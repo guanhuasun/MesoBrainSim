@@ -93,6 +93,26 @@ Implement a solver (e.g., Euler or Heun's method) optimized for vectorized opera
 - Config-driven (dict or YAML): data path, subsample size, model type, solver, dt, T, USE_GPU
 - Single `sim.run()` call → loads data → builds model → integrates → returns results
 
+## Claude Code Strategy
+
+### Performance & Architecture
+- **Speed first.** Output must be most computationally efficient version. Favor vectorized ops (CuPy, NumPy, JAX) over loops.
+- **GPU acceleration.** Use CuPy for all heavy numerical lifting. Minimize CPU-GPU transfers (`.get()`, `cp.array()`) — keep data on device.
+- **Expert context.** User is peer-level expert. Do not explain algorithms; implement them. Use kernel fusions (`cp.ElementwiseKernel`) if it saves time.
+
+### Coding Style
+- **Max conciseness.** Shortest code that maintains peak performance. Use comprehensions, ternary operators, functional patterns.
+- **No boilerplate.** Omit redundant setup, docstring fluff, verbose error handling unless critical to logic.
+
+### Documentation & Git (Telegraphic Style)
+- **Grammar sacrifice.** Omit articles, pronouns, formal punctuation in comments and commit messages.
+- **Comment style:** `# init rand weights`, `# fix loop drift`, `# move to gpu`, `# fuse kernels`
+- **Commit style:** `perf: opt cupy kernel`, `fix: reduce vram overhead`, `feat: add jax solver`
+
+### Interaction Rules
+- **No conversational filler.** Do not apologize or explain why code is fast. Just provide implementation.
+- **Direct execution.** Prioritize shell commands that measure performance (`nvprof`, `time`, `pyinstrument`) immediately after refactoring.
+
 ## Suggested File Layout
 
 ```
