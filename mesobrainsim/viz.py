@@ -58,7 +58,8 @@ class BrainVisualizer:
         activity = self.trajectory[t_index, :, 0]
         cloud = self._build_cloud(activity)
 
-        pl = pv.Plotter(title=f"Brain activity  t = {self.times[t_index]:.1f} ms")
+        pl = pv.Plotter(title=f"Brain activity  t = {self.times[t_index]:.1f} ms",
+                        off_screen=not show)
         pl.add_points(cloud, scalars="activity", cmap=cmap,
                       point_size=point_size, render_points_as_spheres=True)
         pl.add_scalar_bar(title="Activity")
