@@ -121,6 +121,59 @@ class Connectivity:
         print(f"[Connectivity] No connectivity data found -- initialized W to ones ({N}, {N})")
         return sp.csr_matrix(W_np)
 
+    def load_allen_weights(self, allen_h5_path: str, anatomy):
+        """
+        Replace binary W with real Allen projection densities.
+        Reads /projection_matrix/matrix and /projection_matrix/structure_acronyms.
+        Maps structure acronyms -> local node groups via anatomy.region_names.
+        Assigns mean projection density as W values for matched node pairs.
+        """
+        import h5py
+        from .utils import resolve_nodes
+
+        with h5py.File(allen_h5_path, 'r') as f:
+            matrix = np.array(f['projection_matrix/matrix'])          # (n_exp, n_structs)
+            acronyms = [
+                a.decode() if isinstance(a, bytes) else str(a)
+                for a in f['projection_matrix/structure_acronyms']
+            ]
+
+        N = self.W.shape[0]
+        # build dense update buffer on CPU
+        W_cpu = np.zeros((N, N), dtype=np.float32)
+
+        # mean projection per (source_struct, target_struct) pair
+        mean_proj = matrix.mean(axis=0)  # shape (n_structs,) if using col means
+        # For pairwise: use outer mean (approx) or iterate experiment injections
+        # Full pairwise: for each experiment, injection site = source
+        # Here we use the simpler mean_density approach:
+        # W[src_nodes, tgt_nodes] = mean projection density from src to tgt
+        for i, src_acr in enumerate(acronyms):
+            src_idx = resolve_nodes(anatomy, src_acr)
+            if not len(src_idx):
+                continue
+            for j, tgt_acr in enumerate(acronyms):
+                tgt_idx = resolve_nodes(anatomy, tgt_acr)
+                if not len(tgt_idx):
+                    continue
+                density = float(matrix[:, j].mean())
+                if density > 0:
+                    W_cpu[np.ix_(src_idx, tgt_idx)] = density
+
+        np.fill_diagonal(W_cpu, 0)
+        xp = config.xp
+        if N < DENSE_THRESHOLD:
+            self.W = xp.array(W_cpu, dtype=xp.float32)
+        else:
+            W_sparse = sp.csr_matrix(W_cpu)
+            W_sparse.eliminate_zeros()
+            if config.USE_GPU:
+                import cupyx.scipy.sparse as csp
+                self.W = csp.csr_matrix(W_sparse)
+            else:
+                self.W = W_sparse
+        print(f"[Connectivity] Allen weights loaded from '{allen_h5_path}'")
+
     def __repr__(self):
         n = self.W.shape[0]
         return f"Connectivity(n_nodes={n}, sparse={self.is_sparse}, has_distances={self.D is not None})"

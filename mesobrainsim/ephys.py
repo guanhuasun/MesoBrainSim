@@ -81,7 +81,9 @@ class WilsonCowan(NeuralModel):
         E = state[:, 0]
         I = state[:, 1]
 
-        coupled = self.c * xp.asarray(W @ E).ravel()
+        deg     = xp.asarray(np.asarray(W.sum(axis=1)).ravel(), dtype=xp.float32)
+        deg     = xp.maximum(deg, 1.0)
+        coupled = self.c * xp.asarray(W @ E).ravel() / deg  # mean neighbor E, bounded [0,c]
 
         dE = (-E + self._sigmoid(self.a_ee * E - self.a_ei * I + self.P + coupled)) / self.tau_e
         dI = (-I + self._sigmoid(self.a_ie * E - self.a_ii * I + self.Q)) / self.tau_i
@@ -144,7 +146,9 @@ class JansenRit(NeuralModel):
             rng.standard_normal(N).astype(np.float32)
         )
 
-        coupled = self.c * xp.asarray(W @ y[1]).ravel()
+        deg     = xp.asarray(np.asarray(W.sum(axis=1)).ravel(), dtype=xp.float32)
+        deg     = xp.maximum(deg, 1.0)
+        coupled = self.c * xp.asarray(W @ y[1]).ravel() / deg  # mean neighbor y1
 
         dy = [None] * 6
         dy[0] = y[3]
@@ -197,8 +201,10 @@ class IntegrateAndFire(NeuralModel):
         xp = config.xp
         V = state[:, 0]
 
-        spikes = (V >= self.V_thresh).astype(xp.float32)
-        coupled = self.c * xp.asarray(W @ spikes).ravel()
+        spikes  = (V >= self.V_thresh).astype(xp.float32)
+        deg     = xp.asarray(np.asarray(W.sum(axis=1)).ravel(), dtype=xp.float32)
+        deg     = xp.maximum(deg, 1.0)
+        coupled = self.c * xp.asarray(W @ spikes).ravel() / deg  # fraction active neighbors
 
         dV = (-(V - self.V_rest) + self.R * (self.I_ext + coupled)) / self.tau
 
@@ -284,7 +290,10 @@ class HodgkinHuxley(NeuralModel):
         I_K  = self.g_K  * n ** 4     * (V - self.E_K)
         I_L  = self.g_L               * (V - self.E_L)
 
-        coupled = self.c * xp.asarray(W @ V).ravel()
+        raw_deg = xp.asarray(np.asarray(W.sum(axis=1)).ravel(), dtype=xp.float32)
+        Wv      = xp.asarray(W @ V).ravel()
+        # gap junction: c*(mean_neighbor_V - V_i); isolated nodes (deg=0) get 0
+        coupled = self.c * (Wv - raw_deg * V) / xp.maximum(raw_deg, 1.0)
 
         dV = (self.I_ext - I_Na - I_K - I_L + coupled) / self.C
         dm = self._alpha_m(V) * (1.0 - m) - self._beta_m(V) * m
