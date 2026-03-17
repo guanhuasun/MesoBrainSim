@@ -1,44 +1,43 @@
 """
 Connectivity module: builds the structural adjacency matrix from HDF5 data.
 
-The current dataset stores cell-level connectivity in CSR format:
-  - 'offset'  : shape (N_cells + 1,) — row pointers
-  - 'indices' : shape (n_edges,)     — column (target cell) indices
+The dataset stores cell-level connectivity in CSR format:
+  - 'offset'  : shape (N_cells + 1,) -- row pointers
+  - 'indices' : shape (n_edges,)      -- column (target cell) indices
 
 No weight values are stored; all present connections are initialized to 1.
-A region-level count matrix ('region_conn_count') is also available.
+
+For small N (< DENSE_THRESHOLD), a dense xp array is returned so GPU kernels
+can operate on it directly.  For larger N, a scipy.sparse.csr_matrix (CPU) or
+cupyx.scipy.sparse.csr_matrix (GPU) is returned.  Both support the @ operator
+used by the solvers.
 """
 
 import h5py
 import numpy as np
+import scipy.sparse as sp
 from . import config
+
+# Below this node count use a dense matrix; above use sparse.
+DENSE_THRESHOLD = 2000
 
 
 class Connectivity:
     """
-    Builds a dense weight matrix W (N, N) for the subsampled node set.
-
-    Because the full matrix is ~300k × 300k, we only materialise the
-    dense submatrix for the N nodes selected by the Anatomy instance.
+    Builds a weight matrix W for the subsampled node set.
 
     Attributes
     ----------
-    W : xp.ndarray, shape (N, N)
-        Binary weight matrix (1 where a connection exists, 0 otherwise).
-        Diagonal is set to 0 (no self-connections).
+    W : dense xp.ndarray or scipy.sparse.csr_matrix, shape (N, N)
+        Binary weight matrix (1 where a connection exists, 0 elsewhere).
+        Diagonal is 0 (no self-connections).
     D : None
         Distance data is not present in the current dataset.
+    is_sparse : bool
+        True when W is stored as a sparse matrix.
     """
 
     def __init__(self, h5_path: str, anatomy):
-        """
-        Parameters
-        ----------
-        h5_path : str
-            Path to the HDF5 data file.
-        anatomy : Anatomy
-            Loaded Anatomy instance; uses anatomy.indices for subsampling.
-        """
         self.h5_path = h5_path
         self.indices = anatomy.indices
         self.D = None
@@ -46,64 +45,82 @@ class Connectivity:
 
     def _load(self):
         xp = config.xp
-        node_idx = self.indices          # shape (N,)
+        node_idx = self.indices   # shape (N,)
         N = len(node_idx)
 
-        # Map global cell index → position in our subsampled set
-        idx_set = set(node_idx.tolist())
-        global_to_local = {g: l for l, g in enumerate(node_idx.tolist())}
-
         with h5py.File(self.h5_path, "r") as f:
-            keys = list(f.keys())
-            print(f"[Connectivity] HDF5 keys: {keys}")
+            print(f"[Connectivity] HDF5 keys: {list(f.keys())}")
 
             if "offset" in f and "indices" in f:
-                W_np = self._build_from_csr(f, node_idx, idx_set, global_to_local, N)
+                W_sparse = self._build_from_csr(f, node_idx, N)
             else:
-                # Fallback: try dense matrix keys
-                W_np = self._try_dense(f, node_idx, N)
+                W_sparse = self._try_dense_fallback(f, node_idx, N)
 
-        np.fill_diagonal(W_np, 0.0)
-        self.W = xp.array(W_np, dtype=xp.float32)
-        n_edges = int(self.W.sum())
-        print(f"[Connectivity] W shape: ({N}, {N}), edges in subgraph: {n_edges}")
+        # Remove self-connections
+        W_sparse.setdiag(0)
+        W_sparse.eliminate_zeros()
 
-    def _build_from_csr(self, f, node_idx, idx_set, global_to_local, N):
+        n_edges = W_sparse.nnz
+        print(f"[Connectivity] W shape: ({N}, {N}), edges in subgraph: {n_edges}, sparse: {N >= DENSE_THRESHOLD}")
+
+        if N < DENSE_THRESHOLD:
+            self.W = xp.array(W_sparse.toarray(), dtype=xp.float32)
+            self.is_sparse = False
+        else:
+            if config.USE_GPU:
+                import cupyx.scipy.sparse as csp
+                self.W = csp.csr_matrix(W_sparse, dtype=np.float32)
+            else:
+                self.W = W_sparse.astype(np.float32)
+            self.is_sparse = True
+
+    def _build_from_csr(self, f, node_idx, N):
         """
-        Extract the dense N×N submatrix from CSR storage.
-        Reads only the offset slices for the selected rows to avoid
-        loading all 86M edge indices into memory at once.
+        Slice the global CSR arrays to build an N×N sparse submatrix.
+        Reads only the row slices for selected nodes.
         """
-        offset = np.array(f["offset"])          # (N_cells + 1,)
-        col_indices = np.array(f["indices"])     # (n_edges,)  — all edges
+        offset = np.array(f["offset"])       # (N_cells + 1,)
+        col_all = np.array(f["indices"])     # (n_edges,)
 
-        W_np = np.zeros((N, N), dtype=np.float32)
+        # Map global cell index -> local row/col position
+        global_to_local = np.full(int(offset.shape[0]) - 1, -1, dtype=np.int32)
+        global_to_local[node_idx] = np.arange(N, dtype=np.int32)
 
+        rows, cols = [], []
         for local_i, global_i in enumerate(node_idx):
             start = int(offset[global_i])
             end   = int(offset[global_i + 1])
-            targets = col_indices[start:end]
-            for t in targets:
-                local_j = global_to_local.get(int(t))
-                if local_j is not None:
-                    W_np[local_i, local_j] = 1.0
+            targets = col_all[start:end]
+            local_targets = global_to_local[targets]
+            mask = local_targets >= 0
+            local_targets = local_targets[mask]
+            if len(local_targets):
+                rows.append(np.full(len(local_targets), local_i, dtype=np.int32))
+                cols.append(local_targets)
 
+        if rows:
+            rows = np.concatenate(rows)
+            cols = np.concatenate(cols)
+            data = np.ones(len(rows), dtype=np.float32)
+        else:
+            rows = cols = data = np.array([], dtype=np.float32)
+
+        W_sparse = sp.csr_matrix((data, (rows, cols)), shape=(N, N), dtype=np.float32)
         print(f"[Connectivity] Built submatrix from CSR (no weights -- initialized to 1)")
-        return W_np
+        return W_sparse
 
-    def _try_dense(self, f, node_idx, N):
+    def _try_dense_fallback(self, f, node_idx, N):
         for key in ["weights", "weight", "W", "connectivity", "adj", "adjacency"]:
             if key in f:
                 mat = np.array(f[key])
                 if mat.ndim == 2:
-                    sub = mat[np.ix_(node_idx, node_idx)]
-                    print(f"[Connectivity] Loaded dense matrix '{key}' and subsampled to ({N}, {N})")
-                    return sub.astype(np.float32)
-        # No connectivity data at all — fully connected with weight 1
+                    sub = mat[np.ix_(node_idx, node_idx)].astype(np.float32)
+                    print(f"[Connectivity] Loaded dense matrix '{key}', subsampled to ({N}, {N})")
+                    return sp.csr_matrix(sub)
         W_np = np.ones((N, N), dtype=np.float32)
-        print(f"[Connectivity] No connectivity data found — initialized W to ones ({N}, {N})")
-        return W_np
+        print(f"[Connectivity] No connectivity data found -- initialized W to ones ({N}, {N})")
+        return sp.csr_matrix(W_np)
 
     def __repr__(self):
         n = self.W.shape[0]
-        return f"Connectivity(n_nodes={n}, has_distances={self.D is not None})"
+        return f"Connectivity(n_nodes={n}, sparse={self.is_sparse}, has_distances={self.D is not None})"

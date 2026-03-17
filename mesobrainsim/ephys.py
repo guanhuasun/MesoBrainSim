@@ -81,7 +81,7 @@ class WilsonCowan(NeuralModel):
         E = state[:, 0]
         I = state[:, 1]
 
-        coupled = self.c * (W @ E)
+        coupled = self.c * xp.asarray(W @ E).ravel()
 
         dE = (-E + self._sigmoid(self.a_ee * E - self.a_ei * I + self.P + coupled)) / self.tau_e
         dI = (-I + self._sigmoid(self.a_ie * E - self.a_ii * I + self.Q)) / self.tau_i
@@ -144,7 +144,7 @@ class JansenRit(NeuralModel):
             rng.standard_normal(N).astype(np.float32)
         )
 
-        coupled = self.c * (W @ y[1])
+        coupled = self.c * xp.asarray(W @ y[1]).ravel()
 
         dy = [None] * 6
         dy[0] = y[3]
@@ -198,7 +198,7 @@ class IntegrateAndFire(NeuralModel):
         V = state[:, 0]
 
         spikes = (V >= self.V_thresh).astype(xp.float32)
-        coupled = self.c * (W @ spikes)
+        coupled = self.c * xp.asarray(W @ spikes).ravel()
 
         dV = (-(V - self.V_rest) + self.R * (self.I_ext + coupled)) / self.tau
 
@@ -284,7 +284,7 @@ class HodgkinHuxley(NeuralModel):
         I_K  = self.g_K  * n ** 4     * (V - self.E_K)
         I_L  = self.g_L               * (V - self.E_L)
 
-        coupled = self.c * (W @ V)
+        coupled = self.c * xp.asarray(W @ V).ravel()
 
         dV = (self.I_ext - I_Na - I_K - I_L + coupled) / self.C
         dm = self._alpha_m(V) * (1.0 - m) - self._beta_m(V) * m
@@ -335,9 +335,14 @@ class Kuramoto(NeuralModel):
         theta = state[:, 0]
         N = theta.shape[0]
 
-        # Phase difference matrix: theta_j - theta_i  → shape (N, N)
-        diff = theta[xp.newaxis, :] - theta[:, xp.newaxis]
-        coupling = (self.K / N) * xp.sum(W * xp.sin(diff), axis=1)
+        # Sparse-friendly decomposition (avoids NxN dense diff matrix):
+        #   sum_j W_ij * sin(theta_j - theta_i)
+        #   = cos(theta_i) * (W @ sin(theta)) - sin(theta_i) * (W @ cos(theta))
+        sin_t = xp.sin(theta)
+        cos_t = xp.cos(theta)
+        Wsin = xp.asarray(W @ sin_t).ravel()
+        Wcos = xp.asarray(W @ cos_t).ravel()
+        coupling = (self.K / N) * (cos_t * Wsin - sin_t * Wcos)
 
         omega = xp.array(self.omega, dtype=xp.float32) if not hasattr(self.omega, "__len__") \
                 else xp.array(self.omega, dtype=xp.float32)
