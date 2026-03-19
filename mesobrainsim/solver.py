@@ -13,7 +13,7 @@ def _is_sparse(W):
 class EulerSolver:
     def run(self, model, W, T: float, dt: float, record_every: int = 1,
             hooks=None, stimulator=None, plasticity_hooks=None,
-            return_trajectory=True):
+            coupling_model=None, return_trajectory=True):
         xp = config.xp
         hooks = hooks or []
         plasticity_hooks = plasticity_hooks or []
@@ -44,7 +44,10 @@ class EulerSolver:
                     times.append(t)
                 for h in hooks:
                     h(step, t, state)
-            state = state + dt * effective_dfdt(state, t, W)
+
+            coupling = coupling_model.compute(state, W) if coupling_model else None
+            state = state + dt * effective_dfdt(state, t, W, coupling=coupling)
+
             for ph in plasticity_hooks:
                 ph(step, t, state)
 
@@ -66,7 +69,7 @@ class EulerSolver:
 class HeunSolver:
     def run(self, model, W, T: float, dt: float, record_every: int = 1,
             hooks=None, stimulator=None, plasticity_hooks=None,
-            return_trajectory=True):
+            coupling_model=None, return_trajectory=True):
         xp = config.xp
         hooks = hooks or []
         plasticity_hooks = plasticity_hooks or []
@@ -97,8 +100,14 @@ class HeunSolver:
                     times.append(t)
                 for h in hooks:
                     h(step, t, state)
-            k1 = effective_dfdt(state, t, W)
-            k2 = effective_dfdt(state + dt * k1, t + dt, W)
+
+            coupling = coupling_model.compute(state, W) if coupling_model else None
+            k1 = effective_dfdt(state, t, W, coupling=coupling)
+
+            state_pred = state + dt * k1
+            coupling2 = coupling_model.compute(state_pred, W) if coupling_model else None
+            k2 = effective_dfdt(state_pred, t + dt, W, coupling=coupling2)
+
             state = state + (dt / 2.0) * (k1 + k2)
             for ph in plasticity_hooks:
                 ph(step, t, state)

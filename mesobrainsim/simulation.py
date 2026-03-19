@@ -7,6 +7,7 @@ from .ephys import MODELS
 from .solver import SOLVERS
 from .viz import BrainVisualizer
 from .stimulation import MultiStimulator
+from .coupling import COUPLING_MODELS
 
 
 class SimulationResult:
@@ -56,6 +57,8 @@ class Simulation:
         stimulator=None,
         measurement_hooks=None,
         plasticity_hooks=None,
+        coupling_model=None,
+        coupling_kwargs: dict = None,
         allen_h5_path=None,
         return_trajectory=True,
     ):
@@ -88,6 +91,14 @@ class Simulation:
             self.solver = SOLVERS[solver]()
         else:
             self.solver = solver
+
+        # Coupling model
+        if isinstance(coupling_model, str):
+            if coupling_model not in COUPLING_MODELS:
+                raise ValueError(f"Unknown coupling '{coupling_model}'. Available: {list(COUPLING_MODELS.keys())}")
+            self.coupling_model = COUPLING_MODELS[coupling_model](**(coupling_kwargs or {}))
+        else:
+            self.coupling_model = coupling_model
 
         # Stimulator: list -> MultiStimulator
         if isinstance(stimulator, list):
@@ -124,6 +135,7 @@ class Simulation:
             hooks=self.measurement_hooks,
             stimulator=self.stimulator,
             plasticity_hooks=self.plasticity_hooks,
+            coupling_model=self.coupling_model,
             return_trajectory=self.return_trajectory,
         )
 

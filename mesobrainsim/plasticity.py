@@ -76,6 +76,28 @@ class HebbianPlasticity(PlasticityHook):
             W += dW
 
 
+class HomeostaticPlasticity(PlasticityHook):
+    """Scale weights to keep mean activity near a target rate."""
+
+    def __init__(self, target_rate, eta=0.001, signal_var=0,
+                 update_every=10, w_max=None, w_min=None):
+        super().__init__(update_every, w_max, w_min)
+        self.target_rate = target_rate
+        self.eta = eta
+        self.signal_var = signal_var
+
+    def _update(self, t, state):
+        xp = config.xp
+        W = self._W
+        activity = state[:, self.signal_var]
+        mean_act = float(xp.mean(activity))
+        scale = 1.0 + self.eta * (self.target_rate - mean_act)
+        if self._is_sparse:
+            W.data *= xp.float32(scale)
+        else:
+            W *= xp.float32(scale)
+
+
 class STDPPlasticity(PlasticityHook):
     """
     Spike-timing dependent plasticity with exponential trace variables.

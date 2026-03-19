@@ -16,11 +16,10 @@ def resolve_nodes(anatomy, selector):
     if isinstance(selector, np.ndarray):
         return selector.astype(np.intp)
     if isinstance(selector, (list, tuple)):
-        arr = np.asarray(selector)
-        if arr.dtype.kind in ('i', 'u'):
-            return arr.astype(np.intp)
-        # list of strings: recurse
-        idx = np.concatenate([resolve_nodes(anatomy, s) for s in selector]) if len(selector) else np.array([], dtype=np.intp)
+        # recurse over each element (int -> region_id match, str -> name match)
+        if not len(selector):
+            return np.array([], dtype=np.intp)
+        idx = np.concatenate([resolve_nodes(anatomy, s) for s in selector])
         return np.unique(idx).astype(np.intp)
     if isinstance(selector, (int, np.integer)):
         return np.where(anatomy.region_ids == int(selector))[0].astype(np.intp)

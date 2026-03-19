@@ -15,13 +15,15 @@ An extensible, high-performance Python framework for simulating whole-brain dyna
 
 ### B. Electrophysiology Module
 - **Purpose:** Defines the local dynamics of each node.
-- **Model:** Neural Field / Neural Mass models (e.g., Wilson-Cowan or Jansen-Rit).
+- **Model:** Neural Field / Neural Mass models. Priority: Wilson-Cowan and Jansen-Rit (meso-scale focus). Spiking models (IF, HH) and Kuramoto are secondary.
 - **Features:** Must support region-specific and neuron-type-specific equations.
 
 ### C. Connectivity Module
 - **Purpose:** Defines the communication network between nodes.
 - **Data:** Load an adjacency matrix (Weights/Distances) representing structural connectivity.
 - **Processing:** Subsample matrix dimensions to match the Anatomy module.
+- **Coupling Models:** Define how nodes interact (e.g., linear diffusive, sigmoidal, delay-based coupling). Each coupling model computes the inter-node interaction term given the weight matrix and current state.
+- **Plasticity Models:** Define how synaptic weights evolve over time (e.g., Hebbian, STDP, homeostatic). Each plasticity model updates the weight matrix given pre/post activity.
 
 ## 2. Technical Architecture
 
@@ -41,8 +43,15 @@ Implement a solver (e.g., Euler or Heun's method) optimized for vectorized opera
 
 ## Data
 
-- `Zhuang-ABCA-1-Isocortex_rho299_inh_local.h5` (384 MB) — HDF5 file containing spatial coordinates, region metadata, and structural connectivity for the isocortex. Filename encodes parameters: `rho299` (density), `inh` (inhibitory neurons), `local` (local connectivity).
+- `Zhuang-ABCA-1-Isocortex_rho299_inh_local.h5` (384 MB) — HDF5 file containing spatial coordinates, region metadata, and structural connectivity for the isocortex. Filename encodes parameters: `rho299` (density), `inh` (inhibitory neurons), `local` (local connectivity). Located in the project root (not `data/`).
 - The current data has **no weight information** in the connectivity matrix — all weights are initialized to 1.
+- **Region identification:** The HDF5 stores numeric Allen CCF `region_id` values (leaf-level, layer-specific). No human-readable region names — `region_names` are auto-generated as `region_<id>`. Use numeric ID lists with `resolve_nodes()`.
+- **Key Allen CCF leaf region IDs present in the data:**
+  - VISp (primary visual): `[593, 821, 721, 778, 33, 305]`
+  - AUDp (primary auditory): `[1047, 806, 862, 893, 656, 692]`
+  - MOp (primary motor): `[648, 844, 882, 430]`
+  - RSP (retrosplenial): `[687, 962, 943]`
+- **To query additional Allen CCF region IDs:** use `scripts/allensdk_query.py` (requires `allen` conda env): `conda run -n allen python scripts/allensdk_query.py --regions VISp,AUDp --output allen_connectivity.h5`
 
 ## Environment
 
@@ -65,15 +74,23 @@ Implement a solver (e.g., Euler or Heun's method) optimized for vectorized opera
 - **No weight data in current file — initialize all weights to 1**
 - Subsamples rows/columns to match the node indices selected by `Anatomy`
 - Returns weight matrix `W (N, N)` and optional distance matrix `D (N, N)` as `xp` arrays
+- **Coupling models** (`mesobrainsim/coupling.py`): abstract base `CouplingModel` with concrete implementations:
+  - `LinearDiffusive` — `W @ (x_j - x_i)` style coupling
+  - `SigmoidalCoupling` — `W @ sigmoid(x_j)` nonlinear coupling
+  - `DelayCoupling` — distance-dependent conduction delays
+- **Plasticity models** (`mesobrainsim/plasticity.py`): abstract base `PlasticityModel` with concrete implementations:
+  - `HebbianPlasticity` — correlation-based weight update
+  - `STDPPlasticity` — spike-timing-dependent plasticity
+  - `HomeostaticPlasticity` — activity-dependent scaling to stabilize dynamics
 
 ### Phase 4 — Electrophysiology Module (`mesobrainsim/ephys.py`)
 - Abstract base class `NeuralModel` with a `dfdt(state, t)` method
-- Concrete implementations:
-  - `WilsonCowan` — excitatory/inhibitory population model
-  - `JansenRit` — cortical column model
-  - `IntegrateAndFire` — leaky integrate-and-fire spiking neuron
-  - `HodgkinHuxley` — conductance-based spiking neuron (Na, K, leak channels)
-  - `Kuramoto` — phase oscillator model for synchronization dynamics
+- Concrete implementations (priority order):
+  - `WilsonCowan` — excitatory/inhibitory population model (primary, meso-scale)
+  - `JansenRit` — cortical column model (primary, meso-scale)
+  - `IntegrateAndFire` — leaky integrate-and-fire spiking neuron (secondary)
+  - `HodgkinHuxley` — conductance-based spiking neuron (secondary)
+  - `Kuramoto` — phase oscillator model for synchronization dynamics (secondary)
 - Support region-specific parameters: each node can carry its own parameter vector
 
 ### Phase 5 — Numerical Solver (`mesobrainsim/solver.py`)
@@ -121,6 +138,8 @@ mesobrainsim/
     config.py          # xp backend switch
     anatomy.py
     connectivity.py
+    coupling.py        # CouplingModel base + LinearDiffusive, Sigmoidal, Delay
+    plasticity.py      # PlasticityModel base + Hebbian, STDP, Homeostatic
     ephys.py           # NeuralModel base + WilsonCowan, JansenRit, IntegrateAndFire, HodgkinHuxley, Kuramoto
     solver.py          # EulerSolver, HeunSolver
     viz.py             # PyVista visualization

@@ -12,6 +12,16 @@ import numpy as np
 from . import config
 
 
+def _degree(W):
+    """Row-sum of W, works for dense/sparse on CPU/GPU."""
+    xp = config.xp
+    s = W.sum(axis=1)
+    if hasattr(s, 'A1'):  # scipy sparse .sum() -> np.matrix
+        s = s.A1
+    s = xp.asarray(s, dtype=xp.float32).ravel()
+    return xp.maximum(s, 1.0)
+
+
 class NeuralModel:
     """Abstract base class for all neural models."""
 
@@ -23,15 +33,18 @@ class NeuralModel:
         xp = config.xp
         return xp.zeros((N, self.state_dim), dtype=xp.float32)
 
-    def dfdt(self, state, t: float, W):
+    def dfdt(self, state, t: float, W, coupling=None):
         """
         Compute time derivative of state.
 
         Parameters
         ----------
-        state : xp.ndarray, shape (N, state_dim)
-        t     : float, current time
-        W     : xp.ndarray, shape (N, N), weight matrix
+        state    : xp.ndarray, shape (N, state_dim)
+        t        : float, current time
+        W        : xp.ndarray, shape (N, N), weight matrix
+        coupling : xp.ndarray, shape (N,), optional
+            Pre-computed coupling term from a CouplingModel. When provided,
+            models use this instead of computing coupling internally.
 
         Returns
         -------
@@ -76,14 +89,16 @@ class WilsonCowan(NeuralModel):
         xp = config.xp
         return 1.0 / (1.0 + xp.exp(-x))
 
-    def dfdt(self, state, t, W):
+    def dfdt(self, state, t, W, coupling=None):
         xp = config.xp
         E = state[:, 0]
         I = state[:, 1]
 
-        deg     = xp.asarray(np.asarray(W.sum(axis=1)).ravel(), dtype=xp.float32)
-        deg     = xp.maximum(deg, 1.0)
-        coupled = self.c * xp.asarray(W @ E).ravel() / deg  # mean neighbor E, bounded [0,c]
+        if coupling is None:
+            deg     = _degree(W)
+            coupled = self.c * xp.asarray(W @ E).ravel() / deg
+        else:
+            coupled = coupling
 
         dE = (-E + self._sigmoid(self.a_ee * E - self.a_ei * I + self.P + coupled)) / self.tau_e
         dI = (-I + self._sigmoid(self.a_ie * E - self.a_ii * I + self.Q)) / self.tau_i
@@ -134,9 +149,11 @@ class JansenRit(NeuralModel):
 
     def _sigm(self, v):
         xp = config.xp
-        return (2.0 * self.e0) / (1.0 + xp.exp(self.r * (self.v0 - v)))
+        x = self.r * (self.v0 - v)
+        x = xp.clip(x, -30.0, 30.0)  # prevent exp overflow
+        return (2.0 * self.e0) / (1.0 + xp.exp(x))
 
-    def dfdt(self, state, t, W):
+    def dfdt(self, state, t, W, coupling=None):
         xp = config.xp
         y = [state[:, i] for i in range(6)]
 
@@ -146,9 +163,11 @@ class JansenRit(NeuralModel):
             rng.standard_normal(N).astype(np.float32)
         )
 
-        deg     = xp.asarray(np.asarray(W.sum(axis=1)).ravel(), dtype=xp.float32)
-        deg     = xp.maximum(deg, 1.0)
-        coupled = self.c * xp.asarray(W @ y[1]).ravel() / deg  # mean neighbor y1
+        if coupling is None:
+            deg     = _degree(W)
+            coupled = self.c * xp.asarray(W @ y[1]).ravel() / deg
+        else:
+            coupled = coupling
 
         dy = [None] * 6
         dy[0] = y[3]
@@ -197,14 +216,16 @@ class IntegrateAndFire(NeuralModel):
         self.I_ext = I_ext
         self.c = c
 
-    def dfdt(self, state, t, W):
+    def dfdt(self, state, t, W, coupling=None):
         xp = config.xp
         V = state[:, 0]
 
         spikes  = (V >= self.V_thresh).astype(xp.float32)
-        deg     = xp.asarray(np.asarray(W.sum(axis=1)).ravel(), dtype=xp.float32)
-        deg     = xp.maximum(deg, 1.0)
-        coupled = self.c * xp.asarray(W @ spikes).ravel() / deg  # fraction active neighbors
+        if coupling is None:
+            deg     = _degree(W)
+            coupled = self.c * xp.asarray(W @ spikes).ravel() / deg
+        else:
+            coupled = coupling
 
         dV = (-(V - self.V_rest) + self.R * (self.I_ext + coupled)) / self.tau
 
@@ -279,7 +300,7 @@ class HodgkinHuxley(NeuralModel):
         xp = config.xp
         return 0.125 * xp.exp(-(V + 65.0) / 80.0)
 
-    def dfdt(self, state, t, W):
+    def dfdt(self, state, t, W, coupling=None):
         xp = config.xp
         V = state[:, 0]
         m = state[:, 1]
@@ -290,10 +311,12 @@ class HodgkinHuxley(NeuralModel):
         I_K  = self.g_K  * n ** 4     * (V - self.E_K)
         I_L  = self.g_L               * (V - self.E_L)
 
-        raw_deg = xp.asarray(np.asarray(W.sum(axis=1)).ravel(), dtype=xp.float32)
-        Wv      = xp.asarray(W @ V).ravel()
-        # gap junction: c*(mean_neighbor_V - V_i); isolated nodes (deg=0) get 0
-        coupled = self.c * (Wv - raw_deg * V) / xp.maximum(raw_deg, 1.0)
+        if coupling is None:
+            raw_deg = _degree(W)
+            Wv      = xp.asarray(W @ V).ravel()
+            coupled = self.c * (Wv - raw_deg * V) / xp.maximum(raw_deg, 1.0)
+        else:
+            coupled = coupling
 
         dV = (self.I_ext - I_Na - I_K - I_L + coupled) / self.C
         dm = self._alpha_m(V) * (1.0 - m) - self._beta_m(V) * m
@@ -339,24 +362,25 @@ class Kuramoto(NeuralModel):
         self.omega = omega
         self.K = K
 
-    def dfdt(self, state, t, W):
+    def dfdt(self, state, t, W, coupling=None):
         xp = config.xp
         theta = state[:, 0]
         N = theta.shape[0]
 
-        # Sparse-friendly decomposition (avoids NxN dense diff matrix):
-        #   sum_j W_ij * sin(theta_j - theta_i)
-        #   = cos(theta_i) * (W @ sin(theta)) - sin(theta_i) * (W @ cos(theta))
-        sin_t = xp.sin(theta)
-        cos_t = xp.cos(theta)
-        Wsin = xp.asarray(W @ sin_t).ravel()
-        Wcos = xp.asarray(W @ cos_t).ravel()
-        coupling = (self.K / N) * (cos_t * Wsin - sin_t * Wcos)
+        if coupling is not None:
+            # external coupling overrides internal
+            coupling_term = coupling
+        else:
+            sin_t = xp.sin(theta)
+            cos_t = xp.cos(theta)
+            Wsin = xp.asarray(W @ sin_t).ravel()
+            Wcos = xp.asarray(W @ cos_t).ravel()
+            coupling_term = (self.K / N) * (cos_t * Wsin - sin_t * Wcos)
 
         omega = xp.array(self.omega, dtype=xp.float32) if not hasattr(self.omega, "__len__") \
                 else xp.array(self.omega, dtype=xp.float32)
 
-        dtheta = omega + coupling
+        dtheta = omega + coupling_term
         return xp.expand_dims(dtheta, axis=1)
 
     def initial_state(self, N):

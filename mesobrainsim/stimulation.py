@@ -27,8 +27,8 @@ class StimulatorHook:
         """Return dfdt closure that adds self._buffer to d[:, var_col]."""
         vc = self.var_col
         buf = self._buffer
-        def _shim(state, t, W):
-            d = model.dfdt(state, t, W)
+        def _shim(state, t, W, coupling=None):
+            d = model.dfdt(state, t, W, coupling=coupling)
             d[:, vc] = d[:, vc] + buf
             return d
         return _shim
@@ -89,8 +89,8 @@ class MultiStimulator:
 
     def get_shim(self, model, var_col=None):
         stims = self.stimulators
-        def _shim(state, t, W):
-            d = model.dfdt(state, t, W)
+        def _shim(state, t, W, coupling=None):
+            d = model.dfdt(state, t, W, coupling=coupling)
             for s in stims:
                 d[:, s.var_col] = d[:, s.var_col] + s._buffer
             return d
